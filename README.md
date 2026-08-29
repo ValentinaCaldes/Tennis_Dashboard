@@ -1,57 +1,73 @@
-# Pipeline de datos ATP + clima
+# Tennis Analytics Dashboard
 
-Corré esto en tu compu (no en el sandbox de Claude, que tiene internet
-restringido). Necesitás Python 3.9+.
+Portfolio project: Python data pipeline + React dashboard analyzing ATP/WTA
+tennis data from Jeff Sackmann's [Match Charting Project](https://github.com/JeffSackmann/tennis_MatchChartingProject).
 
-## Setup
+## Structure
 
-```bash
-pip install pandas numpy requests
+```
+tennis-dashboard-pipeline/
+  scripts/            Python ETL pipeline
+  docs/               KPI planning notes
+  data/               (gitignored) local copy of Match Charting Project CSVs
+  output/             (gitignored) generated CSVs + tennisData.js
+  tennis-frontend/    React + Vite + Recharts dashboard
 ```
 
-## Orden de ejecución
+## Setup from scratch (new machine)
 
+### 1. Get the Match Charting Project data
+This repo does NOT include the raw match data (it's a separate public dataset,
+not something to bundle here). Clone it separately:
 ```bash
-cd scripts
-
-# 1. Descarga partidos ATP (elegí el rango de años que quieras)
-python 01_fetch_atp_matches.py --start-year 2018 --end-year 2025
-
-# 2. Geocodifica cada torneo a lat/lon (revisá data/tournament_locations.csv
-#    después -- puede haber algún torneo que no matcheó bien y haya que
-#    ajustar el diccionario MANUAL_CITY_MAP a mano)
-python 02_tournament_locations.py
-
-# 3. Trae clima histórico por edición de torneo (tarda unos minutos,
-#    hace una llamada por torneo-año a la API gratuita de Open-Meteo)
-python 03_fetch_weather.py
-
-# 4. Calcula todas las métricas (serve/return, Elo, win rate por
-#    superficie, efecto agregado del clima)
-python 04_compute_metrics.py
+git clone https://github.com/JeffSackmann/tennis_MatchChartingProject.git
 ```
 
-## Qué genera
+### 2. Run the Python pipeline
+```bash
+cd tennis-dashboard-pipeline/scripts
+pip install pandas numpy
 
-En `output/`:
-- `player_surface_stats.csv` — win rate por jugador y superficie
-- `elo_current.csv` / `elo_history.csv` — ranking Elo propio
-- `weather_effect_by_temp.csv` / `weather_effect_by_wind.csv` — efecto
-  agregado del clima (aclarado como correlación, no causalidad)
-- `matches_with_weather.csv` — dataset completo partido + clima del día
+python 01_fetch_atp_matches.py --source-dir "/path/to/tennis_MatchChartingProject"
+python 02_compute_metrics.py
+python 03_compute_h2h.py
+python 04_compute_match_load.py
+python 05_export_dashboard_json.py
+```
+The last script writes `output/tennisData.js` AND copies it directly into
+`tennis-frontend/src/tennisData.js` -- no manual copying needed.
 
-## Próximo paso
+### 3. Run the frontend
+```bash
+cd ../tennis-frontend
+npm install
+npm run dev
+```
+Open http://localhost:5173
 
-Con esto ya tenés el dataset. El siguiente script (05, todavía no armado)
-tomaría estos CSVs y los convertiría al JSON que consume `src/data.js`
-del template React, más una función de proyección usando el forecast de
-16 días de Open-Meteo (`fetch_forecast_weather` en el script 03, ya
-implementada, lista para usar).
+## Pipeline scripts
 
-## Nota sobre el diccionario de ciudades
+| Script | What it does |
+|---|---|
+| `01_fetch_atp_matches.py` | Reads local Match Charting Project CSVs, derives match winners from point-by-point data, consolidates into `data/atp_matches_raw.csv` |
+| `02_compute_metrics.py` | Serve/return stats, dominance ratio, win rate by surface (career + by-year), Elo ratings, tour (ATP/WTA) per player |
+| `03_compute_h2h.py` | Head-to-head records between player pairs, overall and by surface |
+| `04_compute_match_load.py` | Matches per week/month, win rate by rest days (with a "data gap" bucket to filter out charting coverage gaps) |
+| `05_export_dashboard_json.py` | Joins everything into `tennisData.js` for the frontend |
 
-`02_tournament_locations.py` trae un diccionario manual con los ~50
-torneos más comunes. Cuando corras el pipeline con tus años elegidos, va
-a haber algunos nombres de torneo que no maticheen (torneos que cambiaron
-de sede, nombres raros del dataset, etc.) — el script te va a avisar
-cuántos quedaron sin geocodificar al final, para que los completes.
+## Dashboard tabs
+
+1. **Player Overview** -- Elo rating & history, win rate by surface, for one selected player
+2. **Surface Performance** -- cross-player rankings by surface, all-court vs. specialist index
+3. **Serve & Return** -- serve/return metric rankings, aces vs. double faults
+4. **Head-to-Head** -- direct record between any two players
+5. **Match Load & Fatigue** -- *in progress*
+6. **Insights & Rankings** -- *in progress*
+
+## Data notes
+
+- Source is the Match Charting Project, a volunteer-charted subset of matches
+  (not full tour coverage) -- treat absolute numbers as directional, not
+  exhaustive.
+- Elo ratings are custom-calculated (K=32, base 1500), not official ATP/WTA
+  rankings.
