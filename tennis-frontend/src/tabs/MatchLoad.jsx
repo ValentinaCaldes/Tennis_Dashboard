@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
 import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell,
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, LabelList,
 } from "recharts";
 import { KpiCard, ChartCard, SectionLabel } from "../components/Cards";
 
@@ -23,9 +23,9 @@ function fmtPct(v) {
 }
 
 export default function MatchLoad({ data }) {
-  const { players, matchesPerPeriod, restDaysPerformance } = data;
+  const { players, matchesPerPeriod, restDaysPerformance, restDaysPerformanceByPlayer } = data;
   const [tourFilter, setTourFilter] = useState("ALL");
-  const [periodType, setPeriodType] = useState("month");
+  const [periodType, setPeriodType] = useState("quarter");
 
   const tourByPlayer = useMemo(() => {
     const map = new Map();
@@ -46,6 +46,24 @@ export default function MatchLoad({ data }) {
   }, [filteredPlayers, selected]);
 
   const playerLoad = useMemo(() => {
+    if (periodType === "quarter") {
+      // matchesPerPeriod solo trae week/month desde Python -- armamos el
+      // trimestre agregando los meses del jugador seleccionado.
+      const monthly = matchesPerPeriod.filter(
+        (r) => r.player === selected && r.period_type === "month"
+      );
+      const byQuarter = new Map();
+      for (const row of monthly) {
+        const [year, month] = row.period.split("-").map(Number);
+        const q = Math.floor((month - 1) / 3) + 1;
+        const label = `${year} Q${q}`;
+        byQuarter.set(label, (byQuarter.get(label) || 0) + row.matches);
+      }
+      return Array.from(byQuarter, ([period, matches]) => ({ period, matches })).sort((a, b) =>
+        a.period.localeCompare(b.period)
+      );
+    }
+
     return matchesPerPeriod
       .filter((r) => r.player === selected && r.period_type === periodType)
       .sort((a, b) => a.period.localeCompare(b.period));
@@ -60,8 +78,26 @@ export default function MatchLoad({ data }) {
   // El bucket de "hueco de datos" no es descanso real (ver footnote) -- lo
   // mostramos aparte, mas apagado, para no mezclarlo visualmente con los
   // buckets que si son interpretables como descanso genuino.
-  const reliableBuckets = restDaysPerformance.filter((r) => !r.rest_bucket.includes("data gap"));
   const unreliableBucket = restDaysPerformance.find((r) => r.rest_bucket.includes("data gap"));
+
+  // Vista por jugador del mismo grafico: muestra sample-size (matches) al
+  // lado de cada barra, para que la muestra chica sea visible en vez de
+  // estar escondida -- en vez de ocultarla con un umbral minimo.
+  const REST_BUCKET_ORDER = [
+    "0 days (back-to-back)", "1 day", "2-3 days", "4-7 days", "8-30 days",
+    "data gap (>30 days, unreliable)",
+  ];
+  const playerRestData = useMemo(() => {
+    const rows = restDaysPerformanceByPlayer.filter((r) => r.player === selected);
+    return REST_BUCKET_ORDER.map((bucket) => {
+      const row = rows.find((r) => r.rest_bucket === bucket);
+      return {
+        rest_bucket: bucket,
+        matches: row?.matches ?? 0,
+        win_rate: row?.win_rate ?? null,
+      };
+    });
+  }, [restDaysPerformanceByPlayer, selected]);
 
   return (
     <div>
@@ -86,20 +122,20 @@ export default function MatchLoad({ data }) {
           <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Group by:</label>
           <select value={periodType} onChange={(e) => setPeriodType(e.target.value)}>
             <option value="week">Week</option>
-            <option value="month">Month</option>
+            <option value="quarter">Quarter</option>
           </select>
         </div>
       </div>
 
       <div className="kpi-grid">
         <KpiCard label="Total Matches (charted)" value={totalMatches} accent="#2DD4BF" />
-        <KpiCard label={`Active ${periodType === "week" ? "Weeks" : "Months"}`} value={playerLoad.length} accent="#6C8CFF" />
-        <KpiCard label={`Avg. Matches / ${periodType === "week" ? "Week" : "Month"}`} value={avgPerPeriod ? avgPerPeriod.toFixed(1) : "—"} accent="#B18CFF" />
+        <KpiCard label={`Active ${periodType === "week" ? "Weeks" : "Quarters"}`} value={playerLoad.length} accent="#6C8CFF" />
+        <KpiCard label={`Avg. Matches / ${periodType === "week" ? "Week" : "Quarter"}`} value={avgPerPeriod ? avgPerPeriod.toFixed(1) : "—"} accent="#B18CFF" />
         <KpiCard label="Busiest Period" value={busiest ? busiest.period : "—"} unit={busiest ? `${busiest.matches} matches` : ""} accent="#F2A93C" />
       </div>
 
       <SectionLabel>Match Load Over Time</SectionLabel>
-      <ChartCard title={`Matches per ${periodType === "week" ? "Week" : "Month"}`} sub={selected} span2>
+      <ChartCard title={`Matches per ${periodType === "week" ? "Week" : "Quarter"}`} sub={selected} span2>
         <ResponsiveContainer width="100%" height={280}>
           <BarChart data={playerLoad} margin={{ left: -10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" vertical={false} />
@@ -115,26 +151,33 @@ export default function MatchLoad({ data }) {
         </ResponsiveContainer>
       </ChartCard>
 
-      <SectionLabel>Win Rate by Days of Rest (all players, aggregate)</SectionLabel>
+      <SectionLabel>Win Rate by Days of Rest</SectionLabel>
       <p style={{ fontSize: 11, color: "#8A93B3", marginTop: -6, marginBottom: 12 }}>
-        This chart is not player-specific -- it's aggregated across every charted match, because
-        per-player rest samples are too small to mean anything. The greyed-out bar on the right
-        isn't real rest (see note below) -- only the colored bars are interpretable.
+        For {selected}. The number above each bar is how many charted matches fall in that
+        bucket -- most players have very few per bucket, so treat bars with a low count as
+        anecdotal, not a real trend. The last bucket (greyed out) isn't real rest at all -- see
+        the note below.
       </p>
-      <ChartCard title="Win Rate by Rest Bucket" span2>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={restDaysPerformance}>
+      <ChartCard title="Win Rate by Rest Bucket" sub={selected} span2>
+        <ResponsiveContainer width="100%" height={320}>
+          <BarChart data={playerRestData} margin={{ top: 24 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" vertical={false} />
             <XAxis dataKey="rest_bucket" tick={{ fontSize: 10 }} interval={0} angle={-15} textAnchor="end" height={70} />
             <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} domain={[0, 1]} width={40} />
             <Tooltip
-              formatter={(v) => fmtPct(v)}
+              formatter={(v, name) => (name === "win_rate" ? fmtPct(v) : v)}
               contentStyle={TOOLTIP_CONTENT_STYLE}
               labelStyle={TOOLTIP_LABEL_STYLE}
               itemStyle={TOOLTIP_ITEM_STYLE}
             />
             <Bar dataKey="win_rate" radius={[3, 3, 0, 0]}>
-              {restDaysPerformance.map((r, i) => (
+              <LabelList
+                dataKey="matches"
+                position="top"
+                formatter={(v) => `n=${v}`}
+                style={{ fill: "#8A93B3", fontSize: 11 }}
+              />
+              {playerRestData.map((r, i) => (
                 <Cell key={i} fill={r.rest_bucket.includes("data gap") ? UNRELIABLE_COLOR : RELIABLE_COLOR} />
               ))}
             </Bar>
