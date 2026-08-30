@@ -45,10 +45,26 @@ function fmtPct(v) {
   return `${(v * 100).toFixed(1)}%`;
 }
 
+// Minimo de partidos EN ESA SUPERFICIE (no de carrera total) para que un
+// jugador entre en los rankings/top-10 por superficie. Distinto del
+// min-matches del pipeline (50+ partidos de carrera, cualquier superficie):
+// sin esto, alguien con 50 partidos en Hard y solo 3 en Grass apareceria
+// como "especialista" en Grass con una muestra minuscula. Ya no es
+// seleccionable desde la UI (se saco ese control), pero se mantiene fijo
+// aca para evitar ese caso.
+const MIN_MATCHES_PER_SURFACE = 15;
+
+// Mismo criterio que Serve & Return: un jugador entra si esta HOY en el
+// top N del ranking oficial, o si alguna vez llego al top N_PEAK en su
+// carrera (asi los retirados que fueron top 10 -- Federer, Sampras,
+// etc. -- no desaparecen solo por no tener ranking actual).
+const TOP_N_CURRENT = 50;
+const TOP_N_PEAK_EVER = 10;
+
 export default function SurfacePerformance({ data }) {
-  const { players, playerSurfaceStatsByYear } = data;
+  const { players, playerSurfaceStatsByYear, currentRanking, bestCareerRank } = data;
   const [tourFilter, setTourFilter] = useState("ALL");
-  const [minMatches, setMinMatches] = useState(15);
+  const [rankStatusFilter, setRankStatusFilter] = useState("ALL"); // ALL | CURRENT | RETIRED
   const [nameQuery, setNameQuery] = useState("");
   const [selectedPlayer, setSelectedPlayer] = useState(null);
 
@@ -57,6 +73,34 @@ export default function SurfacePerformance({ data }) {
     for (const p of players) map.set(p.player, p.tour);
     return map;
   }, [players]);
+
+  // Ranking oficial ACTUAL por jugador.
+  const currentRankByPlayer = useMemo(() => {
+    const map = new Map();
+    for (const r of currentRanking) map.set(r.player, r.current_rank);
+    return map;
+  }, [currentRanking]);
+
+  // Mejor ranking oficial alcanzado ALGUNA VEZ en la carrera.
+  const bestRankByPlayer = useMemo(() => {
+    const map = new Map();
+    for (const r of bestCareerRank) map.set(r.player, r.best_rank);
+    return map;
+  }, [bestCareerRank]);
+
+  // "Retirado" en este selector = NO tiene ranking oficial hoy pero
+  // llego al top N_PEAK_EVER en algun momento. Un jugador activo que
+  // tambien fue top 10 no cuenta como "retirado" acá.
+  function isEligibleByRanking(player) {
+    const current = currentRankByPlayer.get(player);
+    const peak = bestRankByPlayer.get(player);
+    const meetsCurrentTop = current !== undefined && current <= TOP_N_CURRENT;
+    const meetsPeakTop = peak !== undefined && peak <= TOP_N_PEAK_EVER;
+
+    if (rankStatusFilter === "CURRENT") return meetsCurrentTop;
+    if (rankStatusFilter === "RETIRED") return current === undefined && meetsPeakTop;
+    return meetsCurrentTop || meetsPeakTop; // ALL
+  }
 
   const availableYears = useMemo(() => {
     const years = playerSurfaceStatsByYear.map((r) => r.year);
@@ -95,12 +139,13 @@ export default function SurfacePerformance({ data }) {
   const eligibleRows = useMemo(() => {
     const q = nameQuery.trim().toLowerCase();
     return statsInRange.filter((r) => {
-      if (r.matches < minMatches) return false;
+      if (r.matches < MIN_MATCHES_PER_SURFACE) return false;
+      if (!isEligibleByRanking(r.player)) return false;
       if (tourFilter !== "ALL" && tourByPlayer.get(r.player) !== tourFilter) return false;
       if (q && !r.player.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [statsInRange, minMatches, tourFilter, tourByPlayer, nameQuery]);
+  }, [statsInRange, currentRankByPlayer, bestRankByPlayer, rankStatusFilter, tourFilter, tourByPlayer, nameQuery]);
 
   const allPlayerNames = useMemo(
     () => Array.from(new Set(statsInRange.map((r) => r.player))).sort(),
@@ -163,12 +208,11 @@ export default function SurfacePerformance({ data }) {
           </select>
         </div>
         <div>
-          <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Min. matches on surface:</label>
-          <select value={minMatches} onChange={(e) => setMinMatches(Number(e.target.value))}>
-            <option value={5}>5+</option>
-            <option value={15}>15+</option>
-            <option value={30}>30+</option>
-            <option value={50}>50+</option>
+          <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Ranking status:</label>
+          <select value={rankStatusFilter} onChange={(e) => setRankStatusFilter(e.target.value)}>
+            <option value="ALL">All (current top {TOP_N_CURRENT} + retired top {TOP_N_PEAK_EVER})</option>
+            <option value="CURRENT">Currently ranked (top {TOP_N_CURRENT})</option>
+            <option value="RETIRED">Retired (peak top {TOP_N_PEAK_EVER})</option>
           </select>
         </div>
         <div>
@@ -268,7 +312,7 @@ export default function SurfacePerformance({ data }) {
         />
       </div>
 
-      <SectionLabel>Top 10 by Surface (min. {minMatches} matches)</SectionLabel>
+      <SectionLabel>Top 10 by Surface (min. {MIN_MATCHES_PER_SURFACE} matches on that surface)</SectionLabel>
       <p style={{ fontSize: 11, color: "#8A93B3", marginTop: -6, marginBottom: 12 }}>
         Click a bar to highlight that player across all three charts and the tables below.
       </p>
@@ -312,8 +356,8 @@ export default function SurfacePerformance({ data }) {
       <SectionLabel>All-Court vs. Specialist</SectionLabel>
       <p style={{ fontSize: 12, color: "#8A93B3", marginTop: -6, marginBottom: 12 }}>
         Gap = win rate on best surface minus win rate on worst surface. Smaller gap = more
-        all-court; larger gap = more surface-dependent. Only players with {minMatches}+ matches
-        on all three surfaces (within the selected date range) are included.
+        all-court; larger gap = more surface-dependent. Only players with {MIN_MATCHES_PER_SURFACE}+
+        matches on all three surfaces (within the selected date range) are included.
       </p>
       <div className="chart-grid">
         <ChartCard title="Most All-Court" sub="Smallest gap between best and worst surface">
@@ -368,7 +412,7 @@ export default function SurfacePerformance({ data }) {
       </div>
 
       <p className="footnote">
-        Rankings are limited to players with the selected minimum number of charted matches on
+        Rankings are limited to players with at least {MIN_MATCHES_PER_SURFACE} matches on
         that surface, to avoid small-sample outliers (e.g. a player who is 2-0 on grass showing
         as a "100% win rate specialist"). A highlighted player only appears colored on a chart if
         they rank in that surface's top 10 -- otherwise the highlight has nothing to show there.
