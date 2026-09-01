@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from "react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  BarChart, Bar, Cell,
+  BarChart, Bar, Cell, LabelList,
 } from "recharts";
 import { KpiCard, ChartCard, SectionLabel } from "../components/Cards";
 
@@ -403,6 +403,12 @@ export default function PlayerOverview({ data }) {
                 {surfaceRowsFiltered.map((r, i) => (
                   <Cell key={i} fill={SURFACE_COLORS[r.surface] || PALETTE[i % PALETTE.length]} />
                 ))}
+                <LabelList
+                  dataKey="surface"
+                  position="insideTop"
+                  offset={12}
+                  style={{ fontSize: 20, fontWeight: 700, fill: "#0B0F1A" }}
+                />
               </Bar>
             </BarChart>
           </ResponsiveContainer>

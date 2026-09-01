@@ -19,6 +19,71 @@ const TOOLTIP_CONTENT_STYLE = {
 const TOOLTIP_LABEL_STYLE = { color: "#8A93B3" };
 const TOOLTIP_ITEM_STYLE = { color: "#E7EAF3" };
 
+// Combobox chico para el buscador de jugador -- click abre la lista
+// completa, tipear la filtra. Reemplaza el <input list> + <datalist>
+// nativo (comportamiento inconsistente entre navegadores).
+function PlayerSearchCombobox({ players, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(() => {
+    function handleClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const suggestions = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const pool = q ? players.filter((p) => p.toLowerCase().includes(q)) : players;
+    return pool.slice(0, 50);
+  }, [players, value]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Player:</label>
+      <input
+        type="text"
+        value={value}
+        onClick={() => setOpen(true)}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        placeholder="Click or type a name..."
+        style={{
+          background: "#131A2C", border: "1px solid #1A2138", color: "#E7EAF3",
+          borderRadius: 6, padding: "6px 10px", fontSize: 13, width: 220,
+        }}
+      />
+      {open && suggestions.length > 0 && (
+        <div
+          style={{
+            position: "absolute", top: "100%", left: 0, marginTop: 4,
+            background: "#131A2C", border: "1px solid #1A2138", borderRadius: 6,
+            maxHeight: 260, overflowY: "auto", width: 260, zIndex: 20,
+          }}
+        >
+          {suggestions.map((p) => (
+            <div
+              key={p}
+              onClick={() => {
+                onChange(p);
+                setOpen(false);
+              }}
+              style={{ padding: "6px 10px", fontSize: 13, cursor: "pointer", color: "#E7EAF3" }}
+            >
+              {p}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Solo entran al ranking los jugadores en el top N del ranking ATP/WTA
 // OFICIAL ACTUAL (no de partidos jugados). Efecto secundario importante:
 // como el ranking oficial actual solo existe para jugadores activos hoy
@@ -160,10 +225,26 @@ export default function ServeReturn({ data }) {
     });
   }, [statsInRange, currentRankByPlayer, bestRankByPlayer, rankStatusFilter, tourFilter, tourByPlayer, nameQuery]);
 
-  const allPlayerNames = useMemo(
-    () => Array.from(new Set(serveReturnByPlayerYear.map((r) => r.player))).sort(),
-    [serveReturnByPlayerYear]
-  );
+  // Mismo orden que Player Overview: por ranking oficial actual, y
+  // ademas restringido a lo que ya es elegible con el Tour/Ranking
+  // status elegidos arriba.
+  const allPlayerNames = useMemo(() => {
+    const eligible = players.filter(
+      (p) => (tourFilter === "ALL" || p.tour === tourFilter) && isEligibleByRanking(p.player)
+    );
+    return eligible
+      .map((p) => p.player)
+      .sort((a, b) => {
+        const ra = currentRankByPlayer.get(a);
+        const rb = currentRankByPlayer.get(b);
+        const hasA = ra !== undefined;
+        const hasB = rb !== undefined;
+        if (hasA && hasB) return ra - rb;
+        if (hasA) return -1;
+        if (hasB) return 1;
+        return a.localeCompare(b);
+      });
+  }, [players, tourFilter, currentRankByPlayer, bestRankByPlayer, rankStatusFilter]);
 
   const topServers = useMemo(
     () =>
@@ -216,6 +297,7 @@ export default function ServeReturn({ data }) {
             <option value="WTA">WTA</option>
           </select>
         </div>
+        <PlayerSearchCombobox players={allPlayerNames} value={nameQuery} onChange={setNameQuery} />
         <div>
           <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Ranking status:</label>
           <select value={rankStatusFilter} onChange={(e) => setRankStatusFilter(e.target.value)}>
@@ -255,26 +337,6 @@ export default function ServeReturn({ data }) {
         )}
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Search player:</label>
-        <input
-          type="text"
-          list="serve-player-list"
-          value={nameQuery}
-          onChange={(e) => setNameQuery(e.target.value)}
-          placeholder="Type a name..."
-          style={{
-            background: "#131A2C", border: "1px solid #1A2138", color: "#E7EAF3",
-            borderRadius: 6, padding: "6px 10px", fontSize: 13, width: 220,
-          }}
-        />
-        <datalist id="serve-player-list">
-          {allPlayerNames.map((p) => (
-            <option key={p} value={p} />
-          ))}
-        </datalist>
-      </div>
-
       <div className="kpi-grid">
         <KpiCard
           label="Best Server (1st serve win %)"
@@ -312,7 +374,7 @@ export default function ServeReturn({ data }) {
             <BarChart data={topServers} layout="vertical" margin={{ left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" horizontal={false} />
               <XAxis type="number" tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} domain={[0, 1]} />
-              <YAxis type="category" dataKey="shortName" width={110} tick={{ fontSize: 12 }} />
+              <YAxis type="category" dataKey="shortName" width={115} tick={{ fontSize: 15, fontWeight: 600 }} />
               <Tooltip
                 cursor={false}
                 formatter={(v) => fmtPct(v)}
@@ -335,7 +397,7 @@ export default function ServeReturn({ data }) {
             <BarChart data={topReturners} layout="vertical" margin={{ left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" horizontal={false} />
               <XAxis type="number" />
-              <YAxis type="category" dataKey="shortName" width={110} tick={{ fontSize: 12 }} />
+              <YAxis type="category" dataKey="shortName" width={115} tick={{ fontSize: 15, fontWeight: 600 }} />
               <Tooltip
                 cursor={false}
                 formatter={(v) => fmtNum(v, 2)}

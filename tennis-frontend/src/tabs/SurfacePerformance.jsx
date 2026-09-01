@@ -8,6 +8,71 @@ const SURFACE_COLORS = { Hard: "#6C8CFF", Clay: "#F2A93C", Grass: "#2DD4BF" };
 const HIGHLIGHT_COLOR = "#FFFFFF";
 const SURFACES = ["Hard", "Clay", "Grass"];
 
+// Combobox chico para el buscador de jugador -- click abre la lista
+// completa, tipear la filtra. Reemplaza el <input list> + <datalist>
+// nativo (comportamiento inconsistente entre navegadores).
+function PlayerSearchCombobox({ players, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(() => {
+    function handleClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const suggestions = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const pool = q ? players.filter((p) => p.toLowerCase().includes(q)) : players;
+    return pool.slice(0, 50);
+  }, [players, value]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Player:</label>
+      <input
+        type="text"
+        value={value}
+        onClick={() => setOpen(true)}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        placeholder="Click or type a name..."
+        style={{
+          background: "#131A2C", border: "1px solid #1A2138", color: "#E7EAF3",
+          borderRadius: 6, padding: "6px 10px", fontSize: 13, width: 220,
+        }}
+      />
+      {open && suggestions.length > 0 && (
+        <div
+          style={{
+            position: "absolute", top: "100%", left: 0, marginTop: 4,
+            background: "#131A2C", border: "1px solid #1A2138", borderRadius: 6,
+            maxHeight: 260, overflowY: "auto", width: 260, zIndex: 20,
+          }}
+        >
+          {suggestions.map((p) => (
+            <div
+              key={p}
+              onClick={() => {
+                onChange(p);
+                setOpen(false);
+              }}
+              style={{ padding: "6px 10px", fontSize: 13, cursor: "pointer", color: "#E7EAF3" }}
+            >
+              {p}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TOOLTIP_CONTENT_STYLE = {
   background: "#131A2C",
   border: "1px solid #1A2138",
@@ -147,10 +212,27 @@ export default function SurfacePerformance({ data }) {
     });
   }, [statsInRange, currentRankByPlayer, bestRankByPlayer, rankStatusFilter, tourFilter, tourByPlayer, nameQuery]);
 
-  const allPlayerNames = useMemo(
-    () => Array.from(new Set(statsInRange.map((r) => r.player))).sort(),
-    [statsInRange]
-  );
+  // Mismo orden que Player Overview: por ranking oficial actual, y
+  // ademas restringido a lo que ya es elegible con el Tour/Ranking
+  // status elegidos arriba (no tiene sentido sugerir en el buscador a
+  // alguien que el resto de la pantalla ya esta filtrando afuera).
+  const allPlayerNames = useMemo(() => {
+    const eligible = players.filter(
+      (p) => (tourFilter === "ALL" || p.tour === tourFilter) && isEligibleByRanking(p.player)
+    );
+    return eligible
+      .map((p) => p.player)
+      .sort((a, b) => {
+        const ra = currentRankByPlayer.get(a);
+        const rb = currentRankByPlayer.get(b);
+        const hasA = ra !== undefined;
+        const hasB = rb !== undefined;
+        if (hasA && hasB) return ra - rb;
+        if (hasA) return -1;
+        if (hasB) return 1;
+        return a.localeCompare(b);
+      });
+  }, [players, tourFilter, currentRankByPlayer, bestRankByPlayer, rankStatusFilter]);
 
   const topBySurface = useMemo(() => {
     const result = {};
@@ -198,7 +280,7 @@ export default function SurfacePerformance({ data }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 20, marginBottom: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+      <div style={{ display: "flex", gap: 20, marginBottom: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div>
           <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Tour:</label>
           <select value={tourFilter} onChange={(e) => setTourFilter(e.target.value)}>
@@ -207,6 +289,7 @@ export default function SurfacePerformance({ data }) {
             <option value="WTA">WTA</option>
           </select>
         </div>
+        <PlayerSearchCombobox players={allPlayerNames} value={nameQuery} onChange={setNameQuery} />
         <div>
           <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Ranking status:</label>
           <select value={rankStatusFilter} onChange={(e) => setRankStatusFilter(e.target.value)}>
@@ -233,36 +316,11 @@ export default function SurfacePerformance({ data }) {
             ))}
           </select>
         </div>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <label style={{ marginRight: 8, fontSize: 12, color: "#8A93B3" }}>Search player:</label>
-        <input
-          type="text"
-          list="surface-player-list"
-          value={nameQuery}
-          onChange={(e) => setNameQuery(e.target.value)}
-          placeholder="Type a name..."
-          style={{
-            background: "#131A2C",
-            border: "1px solid #1A2138",
-            color: "#E7EAF3",
-            borderRadius: 6,
-            padding: "6px 10px",
-            fontSize: 13,
-            width: 220,
-          }}
-        />
-        <datalist id="surface-player-list">
-          {allPlayerNames.map((p) => (
-            <option key={p} value={p} />
-          ))}
-        </datalist>
         {selectedPlayer && (
           <button
             onClick={() => setSelectedPlayer(null)}
             style={{
-              marginLeft: 10, fontSize: 11, color: "#8A93B3", background: "transparent",
+              fontSize: 11, color: "#8A93B3", background: "transparent",
               border: "1px solid #1A2138", borderRadius: 6, padding: "5px 10px", cursor: "pointer",
             }}
           >
@@ -323,7 +381,7 @@ export default function SurfacePerformance({ data }) {
               <BarChart data={topBySurface[surface]} layout="vertical" margin={{ left: 10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" horizontal={false} />
                 <XAxis type="number" tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} domain={[0, 1]} />
-                <YAxis type="category" dataKey="shortName" width={110} tick={{ fontSize: 12 }} />
+                <YAxis type="category" dataKey="shortName" width={115} tick={{ fontSize: 15, fontWeight: 600 }} />
                 <Tooltip
                   cursor={false}
                   formatter={(v) => fmtPct(v)}

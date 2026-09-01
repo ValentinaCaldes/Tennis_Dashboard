@@ -1,89 +1,83 @@
 import React, { useState, useMemo } from "react";
-import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell,
-} from "recharts";
-import { KpiCard, ChartCard, SectionLabel } from "../components/Cards";
+import { ChartCard, SectionLabel } from "../components/Cards";
 
-const ELO_COLOR = "#2DD4BF";
-const ALL_COURT_COLOR = "#6C8CFF";
-const SPECIALIST_COLOR = "#FB5B5B";
-
-const TOOLTIP_CONTENT_STYLE = {
-  background: "#131A2C",
-  border: "1px solid #1A2138",
-  borderRadius: 8,
-  color: "#E7EAF3",
-};
-const TOOLTIP_LABEL_STYLE = { color: "#8A93B3" };
-const TOOLTIP_ITEM_STYLE = { color: "#E7EAF3" };
-
-// Mismo piso que Surface Performance: minimo de partidos EN esa
-// superficie especifica para que cuente, asi ningun "gap" de 100% sale
-// de una muestra de 2 partidos.
-const MIN_MATCHES_PER_SURFACE = 15;
-// Top N de cada leaderboard/lista chica de esta pestana.
 const TOP_N = 10;
-// Sanity cap para "partido mas largo" en minutos -- el record real es
-// Isner-Mahut (Wimbledon 2010, 665 min = 11h 5m). Esto es una defensa
-// extra ademas del filtro que ya aplica 03_compute_h2h.py: si algun dia
-// se corre 05 con un h2h_overall.csv viejo/sin ese fix, esto evita que
-// un valor corrupto (vimos un caso real de "2475 minutos" = 41 horas en
-// la fuente) se muestre como si fuera un record valido.
-const MAX_PLAUSIBLE_MATCH_MINUTES = 700;
+const NEXT_TIER_MAX = 30;
+// Minimo de partidos por superficie para que el "gap" de un jugador
+// cuente -- mismo criterio que Surface Performance / Insights.
+const MIN_MATCHES_PER_SURFACE = 15;
+// Cuantos resultados recientes de Elo se usan para medir "volatilidad".
+const ELO_RECENT_N = 20;
+// Umbral (en diferencia relativa) para considerar que una dimension
+// "explica" o "no explica" la diferencia entre grupos.
+const DIFFERENTIATOR_THRESHOLD = 0.10; // 10%
 
 function fmtPct(v) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   return `${(v * 100).toFixed(1)}%`;
 }
-function fmtDate(d) {
-  if (!d) return "—";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return d;
-  return dt.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
-function fmtDuration(minutes) {
-  if (minutes === null || minutes === undefined || Number.isNaN(minutes)) return "—";
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
-function shortName(name) {
-  return name ? name.split(" ").pop() : "—";
+function avg(arr) {
+  const vals = arr.filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  if (!vals.length) return null;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
-export default function Insights({ data }) {
-  const { players, eloCurrent, eloHistory, playerSurfaceStatsByYear, playerTitles, h2hOverall, currentRanking } = data;
-  const [tourFilter, setTourFilter] = useState("ALL");
-  const tourLabel = tourFilter === "ALL" ? "ATP + WTA" : tourFilter;
+// Definicion de cada dimension comparada. "direction" indica que sentido
+// favorece al grupo top: "higher" (mas es mejor), "lower" (menos es
+// mejor, ej. volatilidad o gap de superficie) o "neutral" (solo
+// descriptivo, no hay un "mejor").
+const METRICS = [
+  { key: "titlesPerPlayer", label: "Titles per player (career)", format: (v) => v.toFixed(1), direction: "higher" },
+  { key: "gsTitlesPerPlayer", label: "Grand Slam titles per player", format: (v) => v.toFixed(2), direction: "higher" },
+  { key: "gsWinRate", label: "Grand Slam win rate", format: fmtPct, direction: "higher" },
+  { key: "careerMatches", label: "Career matches per player", format: (v) => Math.round(v).toLocaleString(), direction: "higher" },
+  { key: "gsMatches", label: "Grand Slam matches per player", format: (v) => v.toFixed(1), direction: "higher" },
+  { key: "firstServeWinPct", label: "1st serve win %", format: fmtPct, direction: "higher" },
+  { key: "dominanceRatio", label: "Return dominance ratio", format: (v) => v.toFixed(2), direction: "higher" },
+  { key: "eloStdev", label: `Elo volatility (last ${ELO_RECENT_N} results)`, format: (v) => v.toFixed(1), direction: "lower" },
+  { key: "surfaceGap", label: "Surface versatility gap (best − worst)", format: fmtPct, direction: "lower" },
+  { key: "h2hInternalShare", label: "Matches played against own tier", format: fmtPct, direction: "neutral" },
+];
 
-  const tourByPlayer = useMemo(() => {
+export default function Conclusions({ data }) {
+  const {
+    currentRanking, eloCurrent, eloHistory, playerSurfaceStatsByYear,
+    playerTitles, grandSlamEditions, serveReturnByPlayer, h2hOverall,
+  } = data;
+  const [tourFilter, setTourFilter] = useState("ATP");
+
+  const topGroup = useMemo(
+    () => currentRanking.filter((r) => r.tour === tourFilter && r.current_rank <= TOP_N).map((r) => r.player),
+    [currentRanking, tourFilter]
+  );
+  const nextGroup = useMemo(
+    () => currentRanking.filter((r) => r.tour === tourFilter && r.current_rank > TOP_N && r.current_rank <= NEXT_TIER_MAX).map((r) => r.player),
+    [currentRanking, tourFilter]
+  );
+
+  // --- Elo: nivel actual y volatilidad reciente ------------------------
+  const eloCurrentByPlayer = useMemo(() => new Map(eloCurrent.map((r) => [r.player, r.elo])), [eloCurrent]);
+  const eloHistByPlayer = useMemo(() => {
     const map = new Map();
-    for (const p of players) map.set(p.player, p.tour);
+    for (const r of eloHistory) {
+      if (!map.has(r.player)) map.set(r.player, []);
+      map.get(r.player).push(r);
+    }
+    for (const arr of map.values()) arr.sort((a, b) => new Date(a.date) - new Date(b.date));
     return map;
-  }, [players]);
+  }, [eloHistory]);
 
-  // --- Elo Leaderboard ---------------------------------------------
-  const eloLeaderboard = useMemo(() => {
-    return eloCurrent
-      .filter((r) => tourFilter === "ALL" || r.tour === tourFilter)
-      .slice()
-      .sort((a, b) => b.elo - a.elo)
-      .slice(0, TOP_N)
-      .map((r) => ({ ...r, shortName: shortName(r.player) }));
-  }, [eloCurrent, tourFilter]);
+  function eloStdev(player) {
+    const hist = eloHistByPlayer.get(player) || [];
+    const recent = hist.slice(-ELO_RECENT_N).map((r) => r.elo);
+    if (recent.length < 2) return null;
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const variance = recent.reduce((s, x) => s + (x - mean) ** 2, 0) / recent.length;
+    return Math.sqrt(variance);
+  }
 
-  const peakEloEver = useMemo(() => {
-    const filtered = tourFilter === "ALL" ? eloHistory : eloHistory.filter((r) => tourByPlayer.get(r.player) === tourFilter);
-    if (!filtered.length) return null;
-    return filtered.reduce((best, r) => (!best || r.elo > best.elo ? r : best), null);
-  }, [eloHistory, tourByPlayer, tourFilter]);
-
-  // --- Surface Specialists -------------------------------------------
-  // Agregamos playerSurfaceStatsByYear a nivel de carrera completa (sumamos
-  // todos los anios) para tener win rate por superficie de cada jugador,
-  // igual que hace Surface Performance -- pero aca solo nos interesan los
-  // extremos (mas todo-terreno / mas especializado), no el ranking entero.
-  const surfaceGaps = useMemo(() => {
+  // --- Superficie: gap mejor-peor, carrera completa ---------------------
+  const surfaceGapByPlayer = useMemo(() => {
     const bySurface = new Map(); // player -> Map(surface -> {matches, wins})
     for (const r of playerSurfaceStatsByYear) {
       if (!bySurface.has(r.player)) bySurface.set(r.player, new Map());
@@ -91,347 +85,260 @@ export default function Insights({ data }) {
       const prev = surfaces.get(r.surface) || { matches: 0, wins: 0 };
       surfaces.set(r.surface, { matches: prev.matches + r.matches, wins: prev.wins + r.wins });
     }
-
-    const out = [];
+    const gaps = new Map();
     for (const [player, surfaces] of bySurface) {
-      const rates = [];
-      for (const [surface, { matches, wins }] of surfaces) {
-        if (matches >= MIN_MATCHES_PER_SURFACE) {
-          rates.push({ surface, win_rate: wins / matches });
-        }
+      const validRates = [];
+      for (const { matches, wins } of surfaces.values()) {
+        if (matches >= MIN_MATCHES_PER_SURFACE) validRates.push(wins / matches);
       }
-      if (rates.length < 3) continue; // necesita las 3 superficies con muestra suficiente
-      const best = rates.reduce((a, b) => (b.win_rate > a.win_rate ? b : a));
-      const worst = rates.reduce((a, b) => (b.win_rate < a.win_rate ? b : a));
-      out.push({
-        player,
-        shortName: shortName(player),
-        gap: best.win_rate - worst.win_rate,
-        bestSurface: best.surface,
-        bestRate: best.win_rate,
-        worstSurface: worst.surface,
-        worstRate: worst.win_rate,
-      });
+      if (validRates.length >= 3) gaps.set(player, Math.max(...validRates) - Math.min(...validRates));
     }
-    return out;
+    return gaps;
   }, [playerSurfaceStatsByYear]);
 
-  // Ambas listas se limitan a jugadores en el top 20 del ranking oficial
-  // ACTUAL (ATP o WTA, cada uno dentro del suyo) -- sin esto, salian
-  // nombres de archivo sin relevancia actual (ej. jugadores retirados
-  // hace anios) simplemente porque su carrera entera fue muy pareja o
-  // muy dispareja entre superficies.
-  const TOP_N_CURRENT_FOR_SPECIALISTS = 20;
-  const currentTop20 = useMemo(() => {
-    const tours = tourFilter === "ALL" ? ["ATP", "WTA"] : [tourFilter];
-    return new Set(
-      currentRanking.filter((r) => tours.includes(r.tour) && r.current_rank <= TOP_N_CURRENT_FOR_SPECIALISTS).map((r) => r.player)
-    );
-  }, [currentRanking, tourFilter]);
-
-  const mostAllCourt = useMemo(
-    () => [...surfaceGaps].filter((r) => currentTop20.has(r.player)).sort((a, b) => a.gap - b.gap).slice(0, 5),
-    [surfaceGaps, currentTop20]
-  );
-  const mostSpecialized = useMemo(
-    () => [...surfaceGaps].filter((r) => currentTop20.has(r.player)).sort((a, b) => b.gap - a.gap).slice(0, 5),
-    [surfaceGaps, currentTop20]
-  );
-
-  // --- Notable Findings (calculadas en vivo sobre h2hOverall) --------
-  // --- Titles won by the current Top 10 (del tour elegido) -----------
-  const currentTop10Pool = useMemo(() => {
-    const tours = tourFilter === "ALL" ? ["ATP", "WTA"] : [tourFilter];
-    return new Set(
-      currentRanking.filter((r) => tours.includes(r.tour) && r.current_rank <= 10).map((r) => r.player)
-    );
-  }, [currentRanking, tourFilter]);
-
-  const tourneyAvailableYears = useMemo(() => {
-    const years = playerTitles.map((r) => r.year);
-    return Array.from(new Set(years)).sort((a, b) => a - b);
+  // --- Titulos y Grand Slams --------------------------------------------
+  const titlesCountByPlayer = useMemo(() => {
+    const map = new Map();
+    for (const r of playerTitles) map.set(r.player, (map.get(r.player) || 0) + 1);
+    return map;
   }, [playerTitles]);
 
-  const [tourneyYearFrom, setTourneyYearFrom] = useState("ALL");
-  const [tourneyYearTo, setTourneyYearTo] = useState("ALL");
-
-  // Titulos reales (gano la final de esa edicion), no solo "buen win
-  // rate" -- filtrados al top 10 actual y al rango de anios elegido.
-  const titlesInRange = useMemo(() => {
-    return playerTitles.filter((r) => {
-      if (!currentTop10Pool.has(r.player)) return false;
-      if (tourneyYearFrom !== "ALL" && r.year < Number(tourneyYearFrom)) return false;
-      if (tourneyYearTo !== "ALL" && r.year > Number(tourneyYearTo)) return false;
-      return true;
-    });
-  }, [playerTitles, currentTop10Pool, tourneyYearFrom, tourneyYearTo]);
-
-  // Un color estable por torneo (por orden de aparicion en el rango
-  // elegido), asi el mismo torneo se ve siempre del mismo color si
-  // aparece para mas de un jugador -- para detectar de un vistazo si
-  // dos del top 10 ganaron el mismo torneo en el mismo periodo.
-  const TOURNEY_PALETTE = ["#2DD4BF", "#6C8CFF", "#F2A93C", "#B18CFF", "#FB5B5B", "#4ADE80", "#F472B6", "#38BDF8", "#FACC15", "#A78BFA"];
-  const tourneyColorMap = useMemo(() => {
+  const gsStatsByPlayer = useMemo(() => {
     const map = new Map();
-    for (const r of titlesInRange) {
-      if (!map.has(r.tourney_name)) map.set(r.tourney_name, TOURNEY_PALETTE[map.size % TOURNEY_PALETTE.length]);
+    for (const r of grandSlamEditions) {
+      const prev = map.get(r.player) || { played: 0, won: 0, titles: 0 };
+      prev.played += r.matches_played;
+      prev.won += r.matches_won ?? 0;
+      if (r.won_title) prev.titles += 1;
+      map.set(r.player, prev);
     }
     return map;
-  }, [titlesInRange]);
+  }, [grandSlamEditions]);
 
-  // Lista de titulos (ordenados por anio) para CADA jugador del top 10
-  // actual, en orden de ranking -- incluye a los que no ganaron nada en
-  // el rango elegido, para que el listado siempre muestre a los 10.
-  const titlesByPlayer = useMemo(() => {
-    const byPlayer = new Map();
-    for (const r of titlesInRange) {
-      if (!byPlayer.has(r.player)) byPlayer.set(r.player, []);
-      byPlayer.get(r.player).push(r);
+  // --- Saque / resto y volumen de partidos ------------------------------
+  const serveReturnByPlayerMap = useMemo(() => new Map(serveReturnByPlayer.map((r) => [r.player, r])), [serveReturnByPlayer]);
+
+  // --- Concentracion de H2H dentro del propio grupo ----------------------
+  function internalShare(group) {
+    const groupSet = new Set(group);
+    let total = 0;
+    let internal = 0;
+    for (const r of h2hOverall) {
+      const aIn = groupSet.has(r.player_a);
+      const bIn = groupSet.has(r.player_b);
+      if (aIn) {
+        total += r.total_matches;
+        if (bIn) internal += r.total_matches;
+      }
+      if (bIn && !aIn) {
+        total += r.total_matches;
+      }
     }
-    for (const list of byPlayer.values()) list.sort((a, b) => a.year - b.year);
+    return total > 0 ? internal / total : null;
+  }
 
-    const rankByPlayer = new Map(currentRanking.map((r) => [r.player, r.current_rank]));
-    return Array.from(currentTop10Pool)
-      .map((player) => ({ player, shortName: shortName(player), titles: byPlayer.get(player) || [] }))
-      .sort((a, b) => rankByPlayer.get(a.player) - rankByPlayer.get(b.player));
-  }, [titlesInRange, currentTop10Pool, currentRanking]);
+  // --- Arma los valores de cada metrica para ambos grupos ----------------
+  const groupValues = useMemo(() => {
+    function valuesFor(group) {
+      const titlesPerPlayer = avg(group.map((p) => titlesCountByPlayer.get(p) ?? 0));
+      const gsRows = group.map((p) => gsStatsByPlayer.get(p)).filter(Boolean);
+      const gsTitlesPerPlayer = avg(group.map((p) => gsStatsByPlayer.get(p)?.titles ?? 0));
+      const gsWinRate = avg(gsRows.filter((g) => g.played > 0).map((g) => g.won / g.played));
+      const gsMatches = avg(group.map((p) => gsStatsByPlayer.get(p)?.played ?? 0));
+      const careerMatches = avg(group.map((p) => serveReturnByPlayerMap.get(p)?.matches).filter((v) => v !== undefined));
+      const firstServeWinPct = avg(group.map((p) => serveReturnByPlayerMap.get(p)?.first_win_pct).filter((v) => v !== undefined));
+      const dominanceRatio = avg(group.map((p) => serveReturnByPlayerMap.get(p)?.dominance_ratio_avg).filter((v) => v !== undefined));
+      const stdevs = group.map((p) => eloStdev(p)).filter((v) => v !== null);
+      const eloStdevAvg = avg(stdevs);
+      const gaps = group.map((p) => surfaceGapByPlayer.get(p)).filter((v) => v !== undefined);
+      const surfaceGap = avg(gaps);
+      const h2hInternalShare = internalShare(group);
 
-  // h2hOverall filtrado por tour -- los pares nunca cruzan ATP/WTA en
-  // los datos (no juegan entre si), asi que alcanza con chequear el
-  // tour de player_a para saber el del par entero.
-  const h2hScoped = useMemo(() => {
-    if (tourFilter === "ALL") return h2hOverall;
-    return h2hOverall.filter((r) => tourByPlayer.get(r.player_a) === tourFilter);
-  }, [h2hOverall, tourByPlayer, tourFilter]);
+      return {
+        titlesPerPlayer, gsTitlesPerPlayer, gsWinRate, careerMatches, gsMatches,
+        firstServeWinPct, dominanceRatio, eloStdev: eloStdevAvg, surfaceGap, h2hInternalShare,
+      };
+    }
+    return { top: valuesFor(topGroup), next: valuesFor(nextGroup) };
+  }, [topGroup, nextGroup, titlesCountByPlayer, gsStatsByPlayer, serveReturnByPlayerMap, surfaceGapByPlayer, eloHistByPlayer, h2hOverall]);
 
-  const biggestRivalry = useMemo(() => {
-    if (!h2hScoped.length) return null;
-    return h2hScoped.reduce((best, r) => (!best || r.total_matches > best.total_matches ? r : best), null);
-  }, [h2hScoped]);
+  // --- Ranking de diferenciadores (narrativa auto-generada) --------------
+  const rankedMetrics = useMemo(() => {
+    return METRICS.map((m) => {
+      const topVal = groupValues.top[m.key];
+      const nextVal = groupValues.next[m.key];
+      if (topVal === null || nextVal === null) return { ...m, topVal, nextVal, relDiff: null, favorScore: null };
 
-  const longestMatchOverall = useMemo(() => {
-    const timed = h2hScoped.filter(
-      (r) =>
-        r.longest_match_minutes !== null &&
-        r.longest_match_minutes !== undefined &&
-        r.longest_match_minutes <= MAX_PLAUSIBLE_MATCH_MINUTES
-    );
-    if (!timed.length) return null;
-    return timed.reduce((best, r) => (r.longest_match_minutes > best.longest_match_minutes ? r : best));
-  }, [h2hScoped]);
+      let relDiff;
+      if (nextVal !== 0) {
+        relDiff = (topVal - nextVal) / Math.abs(nextVal);
+      } else {
+        relDiff = topVal > 0 ? Infinity : 0;
+      }
+      const favorScore = m.direction === "higher" ? relDiff : m.direction === "lower" ? -relDiff : null;
+      return { ...m, topVal, nextVal, relDiff, favorScore };
+    });
+  }, [groupValues]);
 
-  const mostSlamFinalsRivalry = useMemo(() => {
-    const withFinals = h2hScoped.filter((r) => r.gs_finals > 0);
-    if (!withFinals.length) return null;
-    return withFinals.reduce((best, r) => (r.gs_finals > best.gs_finals ? r : best));
-  }, [h2hScoped]);
+  const differentiators = rankedMetrics
+    .filter((m) => m.favorScore !== null && m.favorScore >= DIFFERENTIATOR_THRESHOLD)
+    .sort((a, b) => (b.favorScore === Infinity ? 1 : b.favorScore) - (a.favorScore === Infinity ? 1 : a.favorScore))
+    .slice(0, 4);
+
+  const nonDifferentiators = rankedMetrics
+    .filter((m) => m.favorScore !== null && m.favorScore < DIFFERENTIATOR_THRESHOLD)
+    .sort((a, b) => a.favorScore - b.favorScore)
+    .slice(0, 3);
+
+  function describeMetric(m, favorable) {
+    const dirWord = m.direction === "lower" ? "lower" : "higher";
+    const pct = m.relDiff === Infinity ? null : Math.abs(m.relDiff * 100).toFixed(0);
+    if (m.relDiff === Infinity) {
+      return `${m.label}: the top ${TOP_N} hold effectively all of it (next tier averages ~0).`;
+    }
+    return favorable
+      ? `${m.label}: top ${TOP_N} average ${m.format(m.topVal)} vs ${m.format(m.nextVal)} for #${TOP_N + 1}-${NEXT_TIER_MAX} -- ${pct}% ${dirWord === "lower" ? "lower" : "higher"}.`
+      : `${m.label}: top ${TOP_N} average ${m.format(m.topVal)} vs ${m.format(m.nextVal)} for #${TOP_N + 1}-${NEXT_TIER_MAX} -- essentially the same, or the next tier is ahead here.`;
+  }
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 20, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <label style={{ fontSize: 12, color: "#8A93B3" }}>Tour:</label>
-          <select value={tourFilter} onChange={(e) => setTourFilter(e.target.value)}>
-            <option value="ALL">ATP + WTA</option>
-            <option value="ATP">ATP</option>
-            <option value="WTA">WTA</option>
-          </select>
-          <span style={{ fontSize: 11, color: "#8A93B3" }}>(applies to every chart on this page)</span>
-        </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <div>
-            <label style={{ marginRight: 6, fontSize: 11, color: "#8A93B3" }}>From:</label>
-            <select value={tourneyYearFrom} onChange={(e) => setTourneyYearFrom(e.target.value)}>
-              <option value="ALL">All</option>
-              {tourneyAvailableYears.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={{ marginRight: 6, fontSize: 11, color: "#8A93B3" }}>To:</label>
-            <select value={tourneyYearTo} onChange={(e) => setTourneyYearTo(e.target.value)}>
-              <option value="ALL">All</option>
-              {tourneyAvailableYears.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
-          <span style={{ fontSize: 11, color: "#8A93B3" }}>(applies to Titles Won below)</span>
-        </div>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20 }}>
+        <label style={{ fontSize: 12, color: "#8A93B3" }}>Tour:</label>
+        <select value={tourFilter} onChange={(e) => setTourFilter(e.target.value)}>
+          <option value="ATP">ATP</option>
+          <option value="WTA">WTA</option>
+        </select>
+        <span style={{ fontSize: 11, color: "#8A93B3" }}>
+          Comparing current top {TOP_N} ({topGroup.length} players) vs. #{TOP_N + 1}-{NEXT_TIER_MAX} ({nextGroup.length} players)
+        </span>
       </div>
 
-      <div className="kpi-grid">
-        <KpiCard
-          label="Peak Elo Ever Recorded"
-          value={peakEloEver ? Math.round(peakEloEver.elo) : "—"}
-          unit={peakEloEver ? `${shortName(peakEloEver.player)} · ${fmtDate(peakEloEver.date)}` : ""}
-          accent={ELO_COLOR}
-        />
-        <KpiCard
-          label="Most Contested Rivalry"
-          value={biggestRivalry ? `${shortName(biggestRivalry.player_a)} vs ${shortName(biggestRivalry.player_b)}` : "—"}
-          unit={biggestRivalry ? `${biggestRivalry.total_matches} meetings` : ""}
-          accent="#F2A93C"
-        />
-        <KpiCard
-          label="Longest Match on Record"
-          value={longestMatchOverall ? fmtDuration(longestMatchOverall.longest_match_minutes) : "—"}
-          unit={
-            longestMatchOverall
-              ? `${shortName(longestMatchOverall.player_a)} vs ${shortName(longestMatchOverall.player_b)} · ${longestMatchOverall.longest_match_surface}`
-              : ""
-          }
-          accent="#B18CFF"
-        />
-        <KpiCard
-          label="Most Grand Slam Finals (single rivalry)"
-          value={mostSlamFinalsRivalry ? mostSlamFinalsRivalry.gs_finals : "—"}
-          unit={
-            mostSlamFinalsRivalry
-              ? `${shortName(mostSlamFinalsRivalry.player_a)} ${mostSlamFinalsRivalry.gs_finals_a_wins}-${mostSlamFinalsRivalry.gs_finals_b_wins} ${shortName(mostSlamFinalsRivalry.player_b)}`
-              : ""
-          }
-          accent="#FB5B5B"
-        />
+      <div className="chart-grid" style={{ marginBottom: 24 }}>
+        <ChartCard
+          title="What explains the top 10"
+          sub="Dimensions where the top tier clearly outperforms, sorted by size of the gap"
+          span2
+        >
+          {differentiators.length === 0 ? (
+            <p style={{ color: "#8A93B3", padding: 16 }}>Not enough data yet for this tour.</p>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#E7EAF3", lineHeight: 1.8 }}>
+              {differentiators.map((m) => (
+                <li key={m.key}>{describeMetric(m, true)}</li>
+              ))}
+            </ul>
+          )}
+        </ChartCard>
+
+        <ChartCard
+          title="What doesn't explain it"
+          sub="Dimensions where the two tiers are basically even -- or the next tier is ahead"
+          span2
+        >
+          {nonDifferentiators.length === 0 ? (
+            <p style={{ color: "#8A93B3", padding: 16 }}>Not enough data yet for this tour.</p>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#8A93B3", lineHeight: 1.8 }}>
+              {nonDifferentiators.map((m) => (
+                <li key={m.key}>{describeMetric(m, false)}</li>
+              ))}
+            </ul>
+          )}
+        </ChartCard>
       </div>
 
-      <SectionLabel>Elo Leaderboard</SectionLabel>
-      <ChartCard title={`Top ${TOP_N} by Elo Rating`} sub="Custom rating calculated match by match (K=32, base 1500), not the official ranking" span2>
-        <ResponsiveContainer width="100%" height={320}>
-          <BarChart data={eloLeaderboard} layout="vertical" margin={{ left: 10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" horizontal={false} />
-            <XAxis type="number" domain={["dataMin - 50", "dataMax + 50"]} tickFormatter={(v) => Math.round(v)} />
-            <YAxis type="category" dataKey="shortName" width={110} tick={{ fontSize: 12 }} />
-            <Tooltip
-              cursor={false}
-              formatter={(v) => Math.round(v)}
-              labelFormatter={(_, payload) => payload?.[0]?.payload?.player ?? ""}
-              contentStyle={TOOLTIP_CONTENT_STYLE}
-              labelStyle={TOOLTIP_LABEL_STYLE}
-              itemStyle={TOOLTIP_ITEM_STYLE}
-            />
-            <Bar dataKey="elo" fill={ELO_COLOR} radius={[0, 4, 4, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartCard>
-
-      <SectionLabel>Best Tournaments — Current {tourLabel} Top 10</SectionLabel>
-      <p style={{ fontSize: 11, color: "#8A93B3", marginTop: -6, marginBottom: 12 }}>
-        Titles actually won (finals won, not just win rate) by each current ATP top 10 player,
-        within the selected years -- color = tournament, so the same event lights up the same
-        color if more than one of them won it.
-      </p>
+      <SectionLabel>Side by Side</SectionLabel>
       <ChartCard
-        title="Titles Won by the Current Top 10"
-        sub={
-          currentTop10Pool.size
-            ? `Current ${tourLabel} top 10 (${currentTop10Pool.size} players with a Top 10 ranking today)`
-            : "No current ATP top 10 players found in this dataset"
-        }
+        title={`Top ${TOP_N} vs. #${TOP_N + 1}-${NEXT_TIER_MAX}`}
+        sub="Each row is that group's share of the combined total -- scales differ a lot between metrics (Elo vs. win rate vs. titles), so this shows proportion, not raw size. Real values are labeled on each bar."
         span2
       >
-        {titlesByPlayer.every((p) => p.titles.length === 0) ? (
-          <p style={{ color: "#8A93B3", padding: 16 }}>No titles for the current top 10 in this range.</p>
-        ) : (
-          <div>
-            {titlesByPlayer.map((p, i) => (
-              <div
-                key={p.player}
-                style={{
-                  display: "flex", alignItems: "center", gap: 12, padding: "10px 4px",
-                  borderBottom: i < titlesByPlayer.length - 1 ? "1px solid #1A2138" : "none",
-                }}
-              >
-                <span style={{ color: "#E7EAF3", fontSize: 13, width: 90, flexShrink: 0 }}>{p.shortName}</span>
-                {p.titles.length === 0 ? (
-                  <span style={{ color: "#8A93B3", fontSize: 12 }}>No titles in this period</span>
-                ) : (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {p.titles.map((t, j) => (
-                      <span
-                        key={j}
-                        style={{
-                          fontSize: 11, color: "#0B0F1A", fontWeight: 600, padding: "3px 8px",
-                          borderRadius: 12, background: tourneyColorMap.get(t.tourney_name),
-                        }}
-                      >
-                        {t.tourney_name} '{String(t.year).slice(-2)}
-                      </span>
-                    ))}
+        <div>
+          {rankedMetrics.map((m) => {
+            if (m.topVal === null || m.nextVal === null) return null;
+            const sum = Math.abs(m.topVal) + Math.abs(m.nextVal);
+            const rawShare = sum === 0 ? 50 : (Math.abs(m.topVal) / sum) * 100;
+            const share = Math.min(97, Math.max(3, rawShare));
+            return (
+              <div key={m.key} style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, color: "#8A93B3", marginBottom: 5 }}>{m.label}</div>
+                <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden" }}>
+                  <div
+                    style={{
+                      width: `${share}%`, background: "#2DD4BF",
+                      display: "flex", alignItems: "center",
+                      justifyContent: share > 18 ? "flex-start" : "center",
+                      paddingLeft: share > 18 ? 10 : 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0B0F1A" }}>{m.format(m.topVal)}</span>
                   </div>
-                )}
+                  <div
+                    style={{
+                      width: `${100 - share}%`, background: "#6C8CFF",
+                      display: "flex", alignItems: "center",
+                      justifyContent: 100 - share > 18 ? "flex-end" : "center",
+                      paddingRight: 100 - share > 18 ? 10 : 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0B0F1A" }}>{m.format(m.nextVal)}</span>
+                  </div>
+                </div>
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 20, marginTop: 4, fontSize: 12, color: "#8A93B3" }}>
+          <span>
+            <span style={{ display: "inline-block", width: 10, height: 10, background: "#2DD4BF", borderRadius: 2, marginRight: 6 }} />
+            Top {TOP_N}
+          </span>
+          <span>
+            <span style={{ display: "inline-block", width: 10, height: 10, background: "#6C8CFF", borderRadius: 2, marginRight: 6 }} />
+            #{TOP_N + 1}-{NEXT_TIER_MAX}
+          </span>
+        </div>
       </ChartCard>
 
-      <SectionLabel>Surface Specialists</SectionLabel>
-      <p style={{ fontSize: 11, color: "#8A93B3", marginTop: -6, marginBottom: 12 }}>
-        Gap = win rate on best surface minus win rate on worst surface, career-wide. Limited to
-        players in the current {tourLabel} top {TOP_N_CURRENT_FOR_SPECIALISTS} with {MIN_MATCHES_PER_SURFACE}+
-        matches on all three surfaces.
-      </p>
-      <div className="chart-grid">
-        <ChartCard title="Most All-Court" sub="Smallest gap between best and worst surface" span2>
-          {mostAllCourt.length === 0 ? (
-            <p style={{ color: "#8A93B3", padding: 16 }}>Not enough data yet.</p>
-          ) : (
-            <div>
-              {mostAllCourt.map((r, i) => (
-                <div
-                  key={r.player}
-                  style={{
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                    padding: "10px 4px", borderBottom: i < mostAllCourt.length - 1 ? "1px solid #1A2138" : "none",
-                  }}
-                >
-                  <span style={{ color: "#E7EAF3", fontSize: 13 }}>
-                    <span style={{ color: "#8A93B3", marginRight: 8 }}>#{i + 1}</span>
-                    {r.player}
-                  </span>
-                  <span style={{ color: ALL_COURT_COLOR, fontSize: 13, fontWeight: 600 }}>
-                    {fmtPct(r.gap)} gap
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </ChartCard>
-
-        <ChartCard title="Most Specialized" sub="Largest gap between best and worst surface" span2>
-          {mostSpecialized.length === 0 ? (
-            <p style={{ color: "#8A93B3", padding: 16 }}>Not enough data yet.</p>
-          ) : (
-            <div>
-              {mostSpecialized.map((r, i) => (
-                <div
-                  key={r.player}
-                  style={{
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                    padding: "10px 4px", borderBottom: i < mostSpecialized.length - 1 ? "1px solid #1A2138" : "none",
-                  }}
-                >
-                  <span style={{ color: "#E7EAF3", fontSize: 13 }}>
-                    <span style={{ color: "#8A93B3", marginRight: 8 }}>#{i + 1}</span>
-                    {r.player}
-                  </span>
-                  <span style={{ color: SPECIALIST_COLOR, fontSize: 13, fontWeight: 600 }}>
-                    {fmtPct(r.gap)} gap · {r.bestSurface} {fmtPct(r.bestRate)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </ChartCard>
+      <SectionLabel>What the Research Says</SectionLabel>
+      <div
+        style={{
+          background: "#131A2C", border: "1px solid #1A2138", borderRadius: 10,
+          padding: "16px 20px", marginBottom: 24,
+        }}
+      >
+        <p style={{ fontSize: 13, color: "#E7EAF3", lineHeight: 1.8, margin: 0, marginBottom: 14 }}>
+          A peer-reviewed study of over 11,000 professional careers found that top-10 players
+          follow a genuinely different trajectory from everyone else -- their rankings become
+          statistically distinguishable from lower tiers within their first two years on tour,
+          not gradually over a full career.{" "}
+          <a href="https://doi.org/10.1080/02640414.2013.876086" target="_blank" rel="noreferrer" style={{ color: "#6C8CFF" }}>
+            Kovalchik & Ingram, Journal of Sports Sciences (2014)
+          </a>
+        </p>
+        <p style={{ fontSize: 13, color: "#E7EAF3", lineHeight: 1.8, margin: 0 }}>
+          Interestingly, this lines up with a Tennis Australia study using Hawk-Eye tracking
+          data: raw shot speed and movement speed did <em>not</em> reliably separate top-ranked
+          players from the rest -- movement quality and endurance did. Raw power alone doesn't
+          explain elite status any more than any single stat in this dashboard does.{" "}
+          <a
+            href="https://athleticperformanceacademy.co.uk/are-top-10-ranked-tennis-players-better-athletes-than-top-100-ranked-tennis-players/"
+            target="_blank" rel="noreferrer" style={{ color: "#6C8CFF" }}
+          >
+            Athletic Performance Academy, summarizing Tennis Australia's Hawk-Eye research
+          </a>
+        </p>
       </div>
 
       <p className="footnote">
-        Elo is a custom rating calculated match by match (K=32, base 1500), not the official
-        ATP/WTA ranking. All figures on this page are computed live from the same filtered
-        dataset used across the rest of the dashboard (ATP Tour-level matches, Jeff Sackmann's
-        official results archive).
+        Comparison groups are the current official {tourFilter} ranking: top {TOP_N} vs. ranks{" "}
+        {TOP_N + 1}-{NEXT_TIER_MAX}. All numbers on this page (aside from the cited research
+        above) are computed live from the same dataset used across the rest of the dashboard
+        (Jeff Sackmann's official ATP/WTA results archive, ATP/WTA Tour level). "Explains"/
+        "doesn't explain" is based on the relative size of the gap between the two groups'
+        averages, not a causal claim -- these are descriptive comparisons, not a statistical
+        test.
       </p>
     </div>
   );

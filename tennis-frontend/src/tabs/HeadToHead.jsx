@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
 import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LabelList,
 } from "recharts";
 import { KpiCard, ChartCard, SectionLabel } from "../components/Cards";
 
@@ -113,7 +113,10 @@ function PlayerCombobox({ label, players, value, onChange, excludePlayer }) {
 }
 
 export default function HeadToHead({ data }) {
-  const { players, h2hOverall, h2hBySurface, h2hByYear, h2hGsFinalsDetail, currentRanking } = data;
+  const {
+    players, h2hOverall, h2hBySurface, h2hByYear, h2hGsFinalsDetail, currentRanking,
+    eloCurrent, playerSurfaceStatsByYear, serveReturnByPlayer, playerTitles, grandSlamEditions,
+  } = data;
 
   // Solo el top 50 del ranking ATP/WTA oficial ACTUAL -- mezclar ATP y
   // WTA en un cruce no tiene sentido (no juegan entre si), asi que no
@@ -146,12 +149,6 @@ export default function HeadToHead({ data }) {
       setPlayerB(top50Players[1]?.player ?? "");
     }
   }, [top50Players]);
-
-  function swap() {
-    const a = playerA;
-    setPlayerA(playerB);
-    setPlayerB(a);
-  }
 
   const availableYears = useMemo(() => {
     const years = h2hByYear.map((r) => r.year);
@@ -257,6 +254,123 @@ export default function HeadToHead({ data }) {
       });
   }, [h2hBySurface, playerA, playerB]);
 
+  // --- Resumen automatico "que los separa" (solo si tienen historial largo) ---
+  // Minimo de cruces entre ellos para que valga la pena mostrar el resumen
+  // -- con pocos partidos el patron no dice mucho.
+  const MIN_MEETINGS_FOR_SUMMARY = 10;
+
+  const eloByPlayer = useMemo(() => new Map(eloCurrent.map((r) => [r.player, r.elo])), [eloCurrent]);
+  const titlesCountByPlayer = useMemo(() => {
+    const map = new Map();
+    for (const r of playerTitles) map.set(r.player, (map.get(r.player) || 0) + 1);
+    return map;
+  }, [playerTitles]);
+  const gsStatsByPlayer = useMemo(() => {
+    const map = new Map();
+    for (const r of grandSlamEditions) {
+      const prev = map.get(r.player) || { played: 0, won: 0, titles: 0, finals: 0 };
+      prev.played += r.matches_played;
+      prev.won += r.matches_won ?? 0;
+      if (r.won_title) prev.titles += 1;
+      if (r.best_round === "F") prev.finals += 1;
+      map.set(r.player, prev);
+    }
+    return map;
+  }, [grandSlamEditions]);
+  const surfaceGapByPlayer = useMemo(() => {
+    const bySurface = new Map();
+    for (const r of playerSurfaceStatsByYear) {
+      if (!bySurface.has(r.player)) bySurface.set(r.player, new Map());
+      const surfaces = bySurface.get(r.player);
+      const prev = surfaces.get(r.surface) || { matches: 0, wins: 0 };
+      surfaces.set(r.surface, { matches: prev.matches + r.matches, wins: prev.wins + r.wins });
+    }
+    const gaps = new Map();
+    for (const [player, surfaces] of bySurface) {
+      const rates = [];
+      for (const { matches, wins } of surfaces.values()) {
+        if (matches >= 15) rates.push(wins / matches);
+      }
+      if (rates.length >= 3) gaps.set(player, Math.max(...rates) - Math.min(...rates));
+    }
+    return gaps;
+  }, [playerSurfaceStatsByYear]);
+  const serveReturnByPlayerMap = useMemo(() => new Map(serveReturnByPlayer.map((r) => [r.player, r])), [serveReturnByPlayer]);
+
+  const profileValues = useMemo(() => {
+    function valuesFor(p) {
+      const gs = gsStatsByPlayer.get(p);
+      const sr = serveReturnByPlayerMap.get(p);
+      return {
+        elo: eloByPlayer.get(p) ?? null,
+        careerTitles: titlesCountByPlayer.get(p) ?? 0,
+        gsTitles: gs?.titles ?? 0,
+        gsFinals: gs?.finals ?? 0,
+        gsWinRate: gs && gs.played > 0 ? gs.won / gs.played : null,
+        surfaceGap: surfaceGapByPlayer.get(p) ?? null,
+        firstServeWinPct: sr?.first_win_pct ?? null,
+        dominanceRatio: sr?.dominance_ratio_avg ?? null,
+        careerMatches: sr?.matches ?? null,
+      };
+    }
+    return { a: valuesFor(playerA), b: valuesFor(playerB) };
+  }, [playerA, playerB, eloByPlayer, titlesCountByPlayer, gsStatsByPlayer, surfaceGapByPlayer, serveReturnByPlayerMap]);
+
+  const PROFILE_METRICS = [
+    { key: "elo", label: "Elo rating", format: (v) => Math.round(v), direction: "higher" },
+    { key: "careerTitles", label: "Career titles", format: (v) => v, direction: "higher" },
+    { key: "gsTitles", label: "Grand Slam titles", format: (v) => v, direction: "higher" },
+    { key: "gsFinals", label: "Grand Slam finals reached", format: (v) => v, direction: "higher" },
+    { key: "gsWinRate", label: "Grand Slam win rate", format: fmtPct, direction: "higher" },
+    { key: "surfaceGap", label: "Surface versatility gap (lower = more all-court)", format: fmtPct, direction: "lower" },
+    { key: "firstServeWinPct", label: "1st serve win %", format: fmtPct, direction: "higher" },
+    { key: "dominanceRatio", label: "Return dominance ratio", format: (v) => v.toFixed(2), direction: "higher" },
+    { key: "careerMatches", label: "Career matches played", format: (v) => v, direction: "higher" },
+  ];
+
+  function leaderFor(key, direction) {
+    const va = profileValues.a[key];
+    const vb = profileValues.b[key];
+    if (va === null || va === undefined || vb === null || vb === undefined || va === vb) return null;
+    if (direction === "higher") return va > vb ? "A" : "B";
+    return va < vb ? "A" : "B";
+  }
+
+  // "Dia a dia" (rendimiento sostenido) vs "momento grande" (titulos,
+  // finales, y el propio cruce directo) -- si un jugador domina
+  // claramente un lado y el otro domina el otro lado, es un patron
+  // real, no casualidad, y vale la pena decirlo con esas dos etiquetas.
+  const DAY_TO_DAY_KEYS = [
+    { key: "elo", direction: "higher" },
+    { key: "firstServeWinPct", direction: "higher" },
+    { key: "dominanceRatio", direction: "higher" },
+    { key: "surfaceGap", direction: "lower" },
+    { key: "careerMatches", direction: "higher" },
+  ];
+  const BIG_MOMENT_KEYS = [
+    { key: "gsTitles", direction: "higher" },
+    { key: "gsFinals", direction: "higher" },
+    { key: "gsWinRate", direction: "higher" },
+  ];
+
+  function majorityLeader(leaders) {
+    if (!leaders.length) return null;
+    const aCount = leaders.filter((l) => l === "A").length;
+    if (aCount / leaders.length >= 0.6) return "A";
+    if ((leaders.length - aCount) / leaders.length >= 0.6) return "B";
+    return null;
+  }
+
+  const dayToDayLeaders = DAY_TO_DAY_KEYS.map((m) => leaderFor(m.key, m.direction)).filter(Boolean);
+  const h2hLeader = overallRow && overallRow.a_wins !== overallRow.b_wins
+    ? (overallRow.a_wins > overallRow.b_wins ? "A" : "B")
+    : null;
+  const bigMomentLeaders = [...BIG_MOMENT_KEYS.map((m) => leaderFor(m.key, m.direction)), h2hLeader].filter(Boolean);
+  const dayToDayLeader = majorityLeader(dayToDayLeaders);
+  const bigMomentLeader = majorityLeader(bigMomentLeaders);
+  const overallLeaders = [...dayToDayLeaders, ...bigMomentLeaders];
+  const overallLeader = majorityLeader(overallLeaders);
+
   const shortA = playerA.split(" ").pop();
   const shortB = playerB.split(" ").pop();
 
@@ -271,16 +385,6 @@ export default function HeadToHead({ data }) {
           </select>
         </div>
         <PlayerCombobox label="Player A" players={top50Players} value={playerA} onChange={setPlayerA} excludePlayer={playerB} />
-        <button
-          onClick={swap}
-          title="Swap players"
-          style={{
-            background: "#131A2C", border: "1px solid #1A2138", color: "#8A93B3",
-            borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", height: 32,
-          }}
-        >
-          ⇄ Swap
-        </button>
         <PlayerCombobox label="Player B" players={top50Players} value={playerB} onChange={setPlayerB} excludePlayer={playerA} />
         <div>
           <label style={{ marginRight: 6, fontSize: 11, color: "#8A93B3" }}>From:</label>
@@ -385,12 +489,66 @@ export default function HeadToHead({ data }) {
             </div>
           )}
 
+          {overallRow.total_matches >= MIN_MEETINGS_FOR_SUMMARY && (
+            <>
+              <SectionLabel>What Separates Them</SectionLabel>
+              <ChartCard title={`${shortA} vs ${shortB}`} sub="Auto-generated from career stats, surface splits, Grand Slam results and their head-to-head" span2>
+                <p style={{ fontSize: 13, color: "#E7EAF3", lineHeight: 1.7, marginTop: 0, marginBottom: 16 }}>
+                  {dayToDayLeader && bigMomentLeader && dayToDayLeader !== bigMomentLeader ? (
+                    <>
+                      Steadier day-to-day metrics (Elo, serve/return, surface consistency) favor{" "}
+                      <strong>{dayToDayLeader === "A" ? shortA : shortB}</strong>, but{" "}
+                      <strong>{bigMomentLeader === "A" ? shortA : shortB}</strong> converts better
+                      when it matters most -- Grand Slam titles/finals and their head-to-head
+                      record.
+                    </>
+                  ) : overallLeader ? (
+                    <>
+                      <strong>{overallLeader === "A" ? shortA : shortB}</strong> leads on most of
+                      the dimensions compared below, both in day-to-day performance and in the
+                      biggest moments.
+                    </>
+                  ) : (
+                    <>It's a genuinely mixed picture -- no single player leads clearly across these dimensions.</>
+                  )}
+                </p>
+                <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ color: "#8A93B3", textAlign: "left" }}>
+                      <th style={{ padding: "6px 8px" }}>Dimension</th>
+                      <th style={{ padding: "6px 8px", color: COLOR_A }}>{shortA}</th>
+                      <th style={{ padding: "6px 8px", color: COLOR_B }}>{shortB}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {PROFILE_METRICS.map((m) => {
+                      const va = profileValues.a[m.key];
+                      const vb = profileValues.b[m.key];
+                      const leader = leaderFor(m.key, m.direction);
+                      return (
+                        <tr key={m.key} style={{ borderTop: "1px solid #1A2138" }}>
+                          <td style={{ padding: "8px" }}>{m.label}</td>
+                          <td style={{ padding: "8px", fontWeight: leader === "A" ? 700 : 400, color: leader === "A" ? COLOR_A : "#E7EAF3" }}>
+                            {va !== null && va !== undefined ? m.format(va) : "—"}
+                          </td>
+                          <td style={{ padding: "8px", fontWeight: leader === "B" ? 700 : 400, color: leader === "B" ? COLOR_B : "#E7EAF3" }}>
+                            {vb !== null && vb !== undefined ? m.format(vb) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </ChartCard>
+            </>
+          )}
+
           <SectionLabel>Wins by Surface</SectionLabel>
           <ChartCard title={`${shortA} vs ${shortB}`} sub="Head-to-head record on each surface they've played" span2>
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={surfaceRows} margin={{ left: -10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1A2138" vertical={false} />
-                <XAxis dataKey="surface" tick={{ fontSize: 13 }} />
+                <XAxis dataKey="surface" tick={{ fontSize: 18, fontWeight: 700, fill: "#E7EAF3" }} />
                 <YAxis allowDecimals={false} width={30} />
                 <Tooltip
                   cursor={false}

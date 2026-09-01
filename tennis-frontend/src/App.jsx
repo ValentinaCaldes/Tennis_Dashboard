@@ -12,7 +12,7 @@ const TABS = [
   { id: "surface", idx: "02", stage: "SURFACE", label: "Surface Performance", Component: SurfacePerformance },
   { id: "serve", idx: "03", stage: "SERVE", label: "Serve & Return", Component: ServeReturn },
   { id: "h2h", idx: "04", stage: "RIVALS", label: "Head-to-Head", Component: HeadToHead },
-  { id: "load", idx: "05", stage: "SCHEDULE", label: "Match Load & Fatigue", Component: MatchLoad },
+  { id: "load", idx: "05", stage: "SCHEDULE", label: "Match Load", Component: MatchLoad },
   { id: "insights", idx: "06", stage: "INSIGHTS", label: "Insights & Rankings", Component: Insights },
   { id: "conclusions", idx: "07", stage: "ANALYSIS", label: "Conclusions", Component: Conclusions },
 ];
