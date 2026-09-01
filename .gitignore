@@ -18,7 +18,7 @@ scripts/tennis-sackmann-archive-main/
 # JSON/JS generados por el pipeline (dashboard data)
 output/*.json
 output/*.js
-tennis-frontend/public/tennisData.json
+!tennis-frontend/public/tennisData.json
 
 # Node
 tennis-frontend/node_modules/
