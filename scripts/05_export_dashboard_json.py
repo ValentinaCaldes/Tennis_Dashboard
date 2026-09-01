@@ -221,6 +221,59 @@ def write_json_file(data: dict, out_path: Path):
     out_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
+def downsample_elo_history_to_quarterly(elo_history: pd.DataFrame) -> pd.DataFrame:
+    """Colapsa eloHistory a un punto por jugador por trimestre (el ultimo
+    valor de ese trimestre) en vez de un punto por partido. El grafico de
+    Player Overview YA hace exactamente esta misma reduccion en el
+    navegador (se queda con el ultimo Elo de cada trimestre y descarta el
+    resto) -- asi que mandar el detalle partido a partido es puro peso
+    extra sin ninguna ganancia visual. Para un jugador con una carrera
+    larga (cientos de partidos), esto puede reducir sus filas 5-10x, que
+    es exactamente donde se estaba yendo la mayor parte del tamaño del
+    archivo (--min-matches mas alto saca JUGADORES, no reduce cuantos
+    partidos tiene cada uno que sobrevive el filtro)."""
+    if elo_history.empty:
+        return elo_history
+    m = elo_history.sort_values("date").copy()
+    m["quarter"] = m["date"].dt.to_period("Q").astype(str)
+    out = m.groupby(["player", "quarter"], as_index=False).last()
+    return out[["player", "date", "elo"]]
+
+
+def downsample_matches_per_period_to_quarterly(matches_per_period: pd.DataFrame) -> pd.DataFrame:
+    """Mismo criterio que downsample_elo_history_to_quarterly, pero para
+    matchesPerPeriod: Match Load & Fatigue SUMA los partidos semanales
+    dentro de cada trimestre en el navegador para armar el grafico "Matches
+    per Quarter" -- nunca se muestra el detalle semana a semana. Sumamos
+    nosotros ese mismo trimestre en el pipeline (52 semanas/anio -> 4
+    trimestres/anio, ~13x menos filas) y el frontend, al recibir datos que
+    ya vienen por trimestre, simplemente "suma" cada fila consigo misma --
+    mismo resultado final, muchas menos filas viajando.
+    Requiere el cambio de una linea en MatchLoad.jsx (period_type "week"
+    -> "quarter" en el filtro), documentado en el mensaje al usuario."""
+    if matches_per_period.empty:
+        return matches_per_period
+    weekly = matches_per_period[matches_per_period["period_type"] == "week"].copy()
+    other = matches_per_period[matches_per_period["period_type"] != "week"]
+    if weekly.empty:
+        return matches_per_period
+
+    weekly["start_date"] = pd.to_datetime(weekly["period"].str.split("/").str[0])
+    weekly["quarter_period"] = weekly["start_date"].dt.to_period("Q")
+
+    agg = weekly.groupby(["player", "quarter_period"], as_index=False).agg(
+        matches=("matches", "sum"),
+        gs_matches=("gs_matches", "sum"),
+    )
+    agg["period"] = agg["quarter_period"].apply(
+        lambda p: f"{p.start_time.date()}/{p.end_time.date()}"
+    )
+    agg["period_type"] = "quarter"
+    agg = agg[["player", "period", "matches", "gs_matches", "period_type"]]
+
+    return pd.concat([agg, other], ignore_index=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -233,6 +286,7 @@ def main():
     print("Reading CSVs from output/...")
     elo_current = read_csv_safe("elo_current.csv")
     elo_history = read_csv_safe("elo_history.csv", parse_dates=["date"], date_format="%Y-%m-%d")
+    elo_history = downsample_elo_history_to_quarterly(elo_history)
     player_surface = read_csv_safe("player_surface_stats.csv")
     player_surface_by_year = read_csv_safe("player_surface_stats_by_year.csv")
     player_tourney_by_year = read_csv_safe("player_tourney_stats_by_year.csv")
@@ -250,16 +304,15 @@ def main():
     h2h_year = read_csv_safe("h2h_by_year.csv")
     h2h_gs_finals_detail = read_csv_safe("h2h_gs_finals_detail.csv")
     matches_period = read_csv_safe("matches_per_period.csv")
+    matches_period = downsample_matches_per_period_to_quarterly(matches_period)
     rest_perf = read_csv_safe("rest_days_performance.csv")
     rest_perf_by_player = read_csv_safe("rest_days_performance_by_player.csv")
-    rest_detail_raw = read_csv_safe("rest_days_detail.csv")
-    # Solo lo minimo que hace falta para bucketizar el descanso a medida en
-    # el frontend -- no mandamos tourney_name/surface/etc, que no se usan.
-    rest_detail_slim = (
-        rest_detail_raw[["player", "rest_days", "won"]]
-        if not rest_detail_raw.empty
-        else rest_detail_raw
-    )
+    # rest_days_detail.csv (partido a partido) NO se exporta -- confirmado
+    # que ningun componente del frontend lo usa (grep -rn "restDaysDetail"
+    # src/ no encuentra nada). restDaysPerformance/restDaysPerformanceByPlayer
+    # ya traen los buckets pre-calculados que si se muestran en pantalla.
+    # Era el segundo array mas pesado del JSON (300k+ filas a min-matches
+    # bajos) sin aportar nada visible -- sacarlo es peso gratis.
     gs_editions = read_csv_safe("grand_slam_editions.csv")
     current_ranking = read_csv_safe("player_current_rank.csv", base_dir=DATA_DIR)
 
@@ -294,7 +347,6 @@ def main():
     h2h_gs_finals_detail = filter_player_pairs(h2h_gs_finals_detail, qualified)
     matches_period = filter_players(matches_period, qualified)
     rest_perf_by_player = filter_players(rest_perf_by_player, qualified)
-    rest_detail_slim = filter_players(rest_detail_slim, qualified)
     gs_editions = filter_players(gs_editions, qualified)
     current_ranking = filter_players(current_ranking, qualified)
     best_rank = filter_players(best_rank, qualified)
@@ -318,7 +370,6 @@ def main():
         "matchesPerPeriod": to_records(matches_period),
         "restDaysPerformance": to_records(rest_perf),
         "restDaysPerformanceByPlayer": to_records(rest_perf_by_player),
-        "restDaysDetail": to_records(rest_detail_slim),
         "grandSlamEditions": to_records(gs_editions),
         "bestCareerRank": to_records(best_rank),
         "currentRanking": to_records(current_ranking),

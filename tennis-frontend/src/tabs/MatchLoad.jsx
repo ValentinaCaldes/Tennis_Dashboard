@@ -145,8 +145,13 @@ export default function MatchLoad({ data }) {
   }, [filteredPlayers, selected]);
 
   const weeklyRows = useMemo(() => {
+    // El pipeline ahora manda matchesPerPeriod ya sumado por trimestre
+    // (period_type "quarter") en vez de por semana, para que el archivo
+    // pese muchisimo menos -- este tab siempre termina agrupando por
+    // trimestre igual, asi que no se pierde nada. Si algun dia volviera
+    // a exportarse por semana, este filtro lo soportaria sin cambios.
     return matchesPerPeriod
-      .filter((r) => r.player === selected && r.period_type === "week")
+      .filter((r) => r.player === selected && (r.period_type === "quarter" || r.period_type === "week"))
       .map((r) => {
         const startDate = r.period.split("/")[0];
         const q = quarterOf(startDate);
