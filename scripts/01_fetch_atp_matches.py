@@ -53,6 +53,27 @@ TOURS = {
     "wta": ("WTA", "wta_matches_"),
 }
 
+# Algunos anios del archive de Sackmann usan una capitalizacion distinta
+# para el mismo Grand Slam (ej. "Us Open" en vez de "US Open") -- probable
+# inconsistencia entre los archivos csv de distintos anios/contribuidores
+# del archive. Sin normalizar esto, cualquier filtro que compare
+# tourney_name contra un nombre exacto (como GRAND_SLAMS en
+# 04_compute_match_load.py) pierde esos anios enteros silenciosamente --
+# asi fue como se nos escaparon el US Open 2022 y 2025 de Alcaraz.
+CANONICAL_GRAND_SLAMS = {
+    "australian open": "Australian Open",
+    "roland garros": "Roland Garros",
+    "wimbledon": "Wimbledon",
+    "us open": "US Open",
+}
+
+
+def canonicalize_tourney_name(name):
+    if not isinstance(name, str):
+        return name
+    return CANONICAL_GRAND_SLAMS.get(name.strip().lower(), name)
+
+
 # Sackmann's column names -> what the rest of the pipeline expects.
 # Most names are already identical; only "round" needs capitalizing to
 # match what 04_compute_match_load.py looks for.
@@ -173,6 +194,15 @@ def main(source_dir: Path, start_year: int, end_year: int, min_matches: int):
     matches = pd.concat(frames, ignore_index=True)
     matches = matches.rename(columns=RENAME_COLS)
     matches["match_date"] = pd.to_datetime(matches["tourney_date"].astype(str), format="%Y%m%d", errors="coerce")
+
+    # Normalizamos el nombre de los 4 majors (arregla el "Us Open" vs
+    # "US Open" de arriba) y el nivel de torneo a mayusculas (defensa
+    # extra por si algun anio tiene el mismo tipo de inconsistencia en
+    # tourney_level, que es lo que usa 03_compute_h2h.py para detectar
+    # finales de Grand Slam).
+    matches["tourney_name"] = matches["tourney_name"].apply(canonicalize_tourney_name)
+    if "tourney_level" in matches.columns:
+        matches["tourney_level"] = matches["tourney_level"].astype(str).str.strip().str.upper()
 
     print(f"\nApplying player filter...")
     matches = filter_by_min_matches(matches, min_matches)
