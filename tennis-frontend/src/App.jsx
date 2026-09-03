@@ -6,6 +6,7 @@ import HeadToHead from "./tabs/HeadToHead";
 import MatchLoad from "./tabs/MatchLoad";
 import Insights from "./tabs/Insights";
 import Conclusions from "./tabs/Conclusions";
+import { Analytics } from "@vercel/analytics/react"; 
 
 const TABS = [
   { id: "overview", idx: "01", stage: "PROFILE", label: "Player Overview", Component: PlayerOverview },
@@ -107,6 +108,7 @@ export default function App() {
             de cada tab). */}
         <ActiveComponent data={data} />
       </main>
+      <Analytics />
     </div>
   );
 }
